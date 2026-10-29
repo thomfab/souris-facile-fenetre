@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- Lets it build on Linux and macOS too. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>SourisFacileFenetre</AssemblyName>
+    <RootNamespace>SourisFacile</RootNamespace>
+    <Product>Souris facile fenêtre</Product>
+    <Description>Move and resize windows by holding modifier keys.</Description>
+    <Copyright>GPL-2.0-or-later</Copyright>
+    <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Coordinates are physical pixels on every display. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\AppIcon.ico" LogicalName="AppIcon.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SourisFacile.Core\SourisFacile.Core.csproj" />
+  </ItemGroup>
+</Project>

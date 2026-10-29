@@ -1,0 +1,59 @@
+name: Release
+
+# Pushing a version tag (e.g. v0.1.0) builds the app and publishes it as a
+# GitHub release. The tag must match <Version> in Directory.Build.props.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Check the version
+        shell: pwsh
+        run: |
+          $version = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Select-Object -First 1
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            Write-Error "Tag $env:GITHUB_REF_NAME doesn't match Directory.Build.props version $version"
+            exit 1
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Test
+        run: dotnet test tests/SourisFacile.Tests -c Release
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+          - **SourisFacileFenetre-$env:VERSION-setup.exe**: the installer. It asks whether to install for you only (no administrator rights needed) or for all users (asks for them), and picks the x64 or Arm build.
+          - **SourisFacileFenetre-$env:VERSION-x64-portable.exe** / **-arm64-portable.exe**: run it from anywhere, nothing to install.
+
+          Windows 10 or 11. The executables aren't signed, so SmartScreen may warn the first time: click **More info**, then **Run anyway**.
+          "@
+          gh release create $env:GITHUB_REF_NAME `
+            "build/SourisFacileFenetre-$env:VERSION-setup.exe" `
+            "build/SourisFacileFenetre-$env:VERSION-x64-portable.exe" `
+            "build/SourisFacileFenetre-$env:VERSION-arm64-portable.exe" `
+            --title "Souris facile fenêtre $env:VERSION" `
+            --notes $notes

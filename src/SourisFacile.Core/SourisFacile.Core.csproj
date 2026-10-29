@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Everything that doesn't touch Win32, so it can be tested anywhere. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SourisFacile</RootNamespace>
+  </PropertyGroup>
+</Project>
