@@ -2,6 +2,13 @@
 
 Each release's section also appears on its GitHub release page.
 
+## 0.3
+
+- Releasing the click after snapping to the grid now drops the window where
+  it snapped and ends the move or resize. Release the keys and press them
+  again to start another one.
+- Release pages now say what's new.
+
 ## 0.2
 
 - Windows remember their size and place on each display, per app: a window
