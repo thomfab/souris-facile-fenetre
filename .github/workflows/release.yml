@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a version tag (e.g. v0.1) builds the app and publishes it as a
-# GitHub release. The tag must match <Version> in Directory.Build.props.
+# GitHub release. The tag must match <Version> in Directory.Build.props, and
+# CHANGELOG.md must have a "## <version>" section, shown on the release page.
 on:
   push:
     tags:
@@ -28,6 +29,10 @@ jobs:
             Write-Error "Tag $env:GITHUB_REF_NAME doesn't match Directory.Build.props version $version"
             exit 1
           }
+          if (-not (Select-String -Path CHANGELOG.md -Pattern "^## $([regex]::Escape($version))(\s|$)" -Quiet)) {
+            Write-Error "CHANGELOG.md has no section for $version"
+            exit 1
+          }
           "VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Install Inno Setup
@@ -45,7 +50,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # This version's section of CHANGELOG.md, then the install notes.
+          $section = @()
+          $inSection = $false
+          foreach ($line in Get-Content CHANGELOG.md -Encoding utf8) {
+            if ($line -match '^## ') {
+              $inSection = $line -match "^## $([regex]::Escape($env:VERSION))(\s|$)"
+              continue
+            }
+            if ($inSection) { $section += $line }
+          }
+          $whatsNew = ($section -join "`n").Trim()
+          if (-not $whatsNew) {
+            Write-Error "CHANGELOG.md has no section for $env:VERSION"
+            exit 1
+          }
           $notes = @"
+          ## What's new
+
+          $whatsNew
+
+          ## Install
+
           - **SourisFacileFenetre-$env:VERSION-setup.exe**: the installer. It asks whether to install for you only (no administrator rights needed) or for all users (asks for them), and picks the x64 or Arm build.
           - **SourisFacileFenetre-$env:VERSION-x64-portable.exe** / **-arm64-portable.exe**: run it from anywhere, nothing to install.
 

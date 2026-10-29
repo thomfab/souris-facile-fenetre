@@ -181,9 +181,11 @@ tests, which cover everything that doesn't touch Windows, run there.
 
 ### Releasing
 
-Set the version in `Directory.Build.props`, then push a matching tag (e.g.
-`v0.1`): GitHub Actions builds the installer and the portable executables
-and publishes them as a GitHub release.
+Set the version in `Directory.Build.props`, add a section for it at the top
+of [CHANGELOG.md](CHANGELOG.md) (`## 0.3`, then what's new), commit both
+together, then push a matching tag (e.g. `v0.3`). GitHub Actions builds the
+installer and the portable executables and publishes them as a GitHub
+release, with that version's changelog section above the install notes.
 
 ## License
 
