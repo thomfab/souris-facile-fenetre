@@ -58,6 +58,9 @@ internal sealed class WindowMover
     private int updatePending;
     // Whether the button is held down with the keys, to snap to the grid.
     private volatile bool gridClick;
+    // Set when the button is released: the keys do nothing until they're
+    // released and pressed again, so the snapped window stays put.
+    private volatile bool keysSpent;
     private readonly SwipeTracker swipe = new();
     private double lastWheelSend = double.NegativeInfinity;
     private double lastSwipeEvent = double.NegativeInfinity;
@@ -92,7 +95,7 @@ internal sealed class WindowMover
         if (op == Op.None) settings = store.Current;
 
         var point = Native.CursorPosition();
-        var action = settings.Enabled ? settings.Action(InputHooks.CurrentModifiers()) : KeyAction.None;
+        var action = HeldAction(settings);
         var newOp = action switch
         {
             KeyAction.Move => Op.Move,
@@ -314,28 +317,35 @@ internal sealed class WindowMover
     private static double Now => Environment.TickCount64 / 1000.0;
 
     // Pressing the button while holding the keys snaps to the grid until
-    // it's released. The app under the pointer gets neither.
+    // it's released, which ends the move or resize. The app under the
+    // pointer gets neither.
     public bool HandleClick(bool down)
     {
         if (!down)
         {
             if (!gridClick) return false;
             gridClick = false;
+            keysSpent = true;
             ScheduleUpdate();
             return true;
         }
-        var current = store.Current;
-        if (!current.Enabled || current.Action(InputHooks.CurrentModifiers()) == KeyAction.None) return false;
+        if (HeldAction(store.Current) == KeyAction.None) return false;
         gridClick = true;
         ScheduleUpdate();
         return true;
     }
 
-    private bool HoldsMoveKeys()
+    // What the held keys do, nothing once spent by a click until they're
+    // released. Safe to call from any thread.
+    private KeyAction HeldAction(Settings current)
     {
-        var current = store.Current;
-        return current.Enabled && current.Action(InputHooks.CurrentModifiers()) == KeyAction.Move;
+        var action = current.Enabled ? current.Action(InputHooks.CurrentModifiers()) : KeyAction.None;
+        if (!keysSpent) return action;
+        if (action == KeyAction.None) keysSpent = false;
+        return KeyAction.None;
     }
+
+    private bool HoldsMoveKeys() => HeldAction(store.Current) == KeyAction.Move;
 
     public bool HandleWheel(int delta, bool horizontal, Point _)
     {
