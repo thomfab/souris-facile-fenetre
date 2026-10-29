@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
-    <!-- The app version. A release tag must match it, e.g. v0.1.0. -->
-    <Version>0.1.0</Version>
+    <!-- The app version. A release tag must match it, e.g. v0.1. -->
+    <Version>0.1</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

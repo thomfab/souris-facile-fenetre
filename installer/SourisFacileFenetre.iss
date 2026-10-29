@@ -1,5 +1,5 @@
 ﻿; Inno Setup 6 script. Built by build.ps1, which publishes the executables first:
-;   iscc /DAppVersion=0.1.0 installer\SourisFacileFenetre.iss
+;   iscc /DAppVersion=0.1 installer\SourisFacileFenetre.iss
 ;
 ; Setup asks whether to install for the current user only (no administrator
 ; rights needed) or for all users (asks for administrator rights).

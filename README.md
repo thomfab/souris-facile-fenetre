@@ -153,7 +153,7 @@ tests, which cover everything that doesn't touch Windows, run there.
 ### Releasing
 
 Set the version in `Directory.Build.props`, then push a matching tag (e.g.
-`v0.1.0`): GitHub Actions builds the installer and the portable executables
+`v0.1`): GitHub Actions builds the installer and the portable executables
 and publishes them as a GitHub release.
 
 ## License

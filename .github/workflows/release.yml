@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a version tag (e.g. v0.1.0) builds the app and publishes it as a
+# Pushing a version tag (e.g. v0.1) builds the app and publishes it as a
 # GitHub release. The tag must match <Version> in Directory.Build.props.
 on:
   push:
