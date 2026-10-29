@@ -79,8 +79,6 @@ public static class Defaults
     public const string MoveModifiers = "alt,win";
     public const string ResizeModifiers = "control,alt,win";
     public const int SnapThreshold = 16;
-    public const int GridColumns = 4;
-    public const int GridRows = 3;
     public const int GridMin = 1;
     public const int GridMax = 48;
     public const int SnapMax = 200;
@@ -98,11 +96,27 @@ public sealed record GridPreset(string Name, int Columns, int Rows)
         new("Laptop 15–16″", 3, 2),
         new("24–27″", 4, 3),
         new("Ultrawide", 6, 2),
-        new("Ultrawide, fine", 8, 3),
+        new("Ultrawide, fine", 8, 4),
+        new("Portrait", 2, 3),
     ];
+
+    // A grid that suits a display of this size (in pixels at 100% scale),
+    // for displays whose grid was never set.
+    public static (int Columns, int Rows) Sensible(double width, double height)
+    {
+        if (width <= 0 || height <= 0) return (4, 3);
+        if (height > width) return (2, 3);
+        if (width / height >= 2.1) return (8, 4);  // Ultrawide
+        if (width < 1600) return (2, 2);  // 13–14″ laptops
+        if (width < 2000) return (3, 2);  // 15–16″ laptops, 1080p
+        return (4, 3);
+    }
 }
 
-// A grid size for one display, remembered by the display's ID so it applies
+// What the held modifier keys do.
+public enum KeyAction { None, Move, Resize }
+
+// The grid of one display, remembered by the display's ID so it applies
 // again whenever that display is plugged back in.
 public sealed record DisplayGrid(string Name, int Columns, int Rows);
 
@@ -117,10 +131,8 @@ public sealed record Settings
     // In pixels at 100% scale.
     public int SnapThreshold { get; init; } = Defaults.SnapThreshold;
     public bool SnapToWindows { get; init; } = true;
-    public bool GridEnabled { get; init; }
-    public int GridColumns { get; init; } = Defaults.GridColumns;
-    public int GridRows { get; init; } = Defaults.GridRows;
-    // Keyed by display ID.
+    // Keyed by display ID. Version 0.1 also saved a grid switch and a
+    // default grid size, ignored now that every display has a grid.
     public IReadOnlyDictionary<string, DisplayGrid> DisplayGrids { get; init; } = new Dictionary<string, DisplayGrid>();
     public bool ShowGrid { get; init; } = true;
     public bool DimWindows { get; init; } = true;
@@ -128,18 +140,28 @@ public sealed record Settings
     public bool SendWithArrows { get; init; } = true;
     // For touchpads set to "Down motion scrolls down".
     public bool ReverseSwipes { get; init; }
+    public bool RememberFrames { get; init; } = true;
 
     [JsonIgnore] public Modifier MoveKeys => Modifiers.Parse(MoveModifiers);
     [JsonIgnore] public Modifier ResizeKeys => Modifiers.Parse(ResizeModifiers);
 
-    // The display's own grid size if it has one, else the default.
-    public (int Columns, int Rows) GridSize(string? displayId)
+    // `held` must match a combination exactly.
+    public KeyAction Action(Modifier held)
+    {
+        if (ResizeKeys != Modifier.None && held == ResizeKeys) return KeyAction.Resize;
+        if (MoveKeys != Modifier.None && held == MoveKeys) return KeyAction.Move;
+        return KeyAction.None;
+    }
+
+    // The grid of a display `width` × `height` large (in pixels at 100%
+    // scale), which suits its size if it was never set.
+    public (int Columns, int Rows) Grid(string? displayId, double width, double height)
     {
         if (displayId != null && DisplayGrids.TryGetValue(displayId, out var grid))
         {
             return (Defaults.ClampGrid(grid.Columns), Defaults.ClampGrid(grid.Rows));
         }
-        return (Defaults.ClampGrid(GridColumns), Defaults.ClampGrid(GridRows));
+        return GridPreset.Sensible(width, height);
     }
 
     public Settings WithDisplayGrid(string displayId, DisplayGrid? grid)
@@ -163,8 +185,6 @@ public sealed record Settings
             return settings with
             {
                 SnapThreshold = Math.Clamp(settings.SnapThreshold, 0, Defaults.SnapMax),
-                GridColumns = Defaults.ClampGrid(settings.GridColumns),
-                GridRows = Defaults.ClampGrid(settings.GridRows),
                 DisplayGrids = settings.DisplayGrids ?? new Dictionary<string, DisplayGrid>(),
             };
         }
@@ -177,49 +197,50 @@ public sealed record Settings
     public string ToJson() => JsonSerializer.Serialize(this, Json);
 }
 
-// Holds the current settings, saved as JSON in a file.
-public sealed class SettingsStore
+// Holds a value, saved as JSON in a file.
+public class Store<T> where T : class
 {
     private readonly string path;
-    private volatile Settings current;
+    private readonly Func<T, string> serialize;
+    private T current;
 
-    public SettingsStore(string path)
+    public Store(string path, Func<string, T> parse, Func<T, string> serialize, Func<T> empty)
     {
         this.path = path;
+        this.serialize = serialize;
         IsNew = !File.Exists(path);
-        current = IsNew ? new Settings() : Load(path);
+        current = empty();
+        if (!IsNew)
+        {
+            try
+            {
+                current = parse(File.ReadAllText(path));
+            }
+            catch (IOException) { }
+        }
     }
 
-    // Whether there was no settings file yet, i.e. the first launch.
+    // Whether there was no file yet, i.e. the first launch.
     public bool IsNew { get; }
 
     // Safe to read from any thread.
-    public Settings Current => current;
+    public T Current => Volatile.Read(ref current);
 
     public event Action? Changed;
 
-    public void Update(Func<Settings, Settings> change)
+    public void Update(Func<T, T> change)
     {
-        current = change(current);
+        Volatile.Write(ref current, change(Current));
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, current.ToJson());
+            File.WriteAllText(path, serialize(Current));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
         Changed?.Invoke();
     }
-
-    private static Settings Load(string path)
-    {
-        try
-        {
-            return Settings.Parse(File.ReadAllText(path));
-        }
-        catch (IOException)
-        {
-            return new Settings();
-        }
-    }
 }
+
+public sealed class SettingsStore(string path)
+    : Store<Settings>(path, Settings.Parse, s => s.ToJson(), () => new Settings());

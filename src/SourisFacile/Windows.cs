@@ -53,6 +53,29 @@ internal sealed class ManagedWindow(IntPtr handle)
         }
     }
 
+    // The app the window belongs to, to remember where its windows were on
+    // each display: its executable name, e.g. "chrome.exe".
+    public string? App
+    {
+        get
+        {
+            var pid = ProcessId(Handle);
+            var name = ExecutableName(pid);
+            if (name != "applicationframehost.exe") return name;
+            // Store apps live in a frame window of a shared process: the
+            // app itself is the process of the content window inside it.
+            string? inner = null;
+            EnumChildWindows(Handle, (child, _) =>
+            {
+                var childPid = ProcessId(child);
+                if (childPid == pid) return true;
+                inner = ExecutableName(childPid);
+                return false;
+            }, IntPtr.Zero);
+            return inner ?? name;
+        }
+    }
+
     public bool Exists => IsWindow(Handle);
     public bool IsMaximized => IsZoomed(Handle);
     public bool CanMove => Exists;

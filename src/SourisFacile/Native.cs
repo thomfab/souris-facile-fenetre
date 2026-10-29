@@ -15,6 +15,8 @@ internal static class Native
     public const int WM_SYSKEYDOWN = 0x0104;
     public const int WM_SYSKEYUP = 0x0105;
     public const int WM_MOUSEMOVE = 0x0200;
+    public const int WM_LBUTTONDOWN = 0x0201;
+    public const int WM_LBUTTONUP = 0x0202;
     public const int WM_MOUSEWHEEL = 0x020A;
     public const int WM_MOUSEHWHEEL = 0x020E;
     public const int WM_DPICHANGED = 0x02E0;
@@ -247,6 +249,20 @@ internal static class Native
     [DllImport("user32.dll")]
     public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
+    [DllImport("user32.dll")]
+    public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref int lpdwSize);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool CloseHandle(IntPtr hObject);
+
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
@@ -286,6 +302,25 @@ internal static class Native
     {
         GetWindowThreadProcessId(hwnd, out var pid);
         return pid;
+    }
+
+    // The file name of a process's executable, e.g. "chrome.exe".
+    public static string? ExecutableName(uint pid)
+    {
+        var process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (process == IntPtr.Zero) return null;
+        try
+        {
+            var path = new StringBuilder(1024);
+            var size = path.Capacity;
+            return QueryFullProcessImageName(process, 0, path, ref size)
+                ? Path.GetFileName(path.ToString()).ToLowerInvariant()
+                : null;
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
     }
 
     // Hidden by DWM: on another virtual desktop, or a suspended app.

@@ -19,6 +19,7 @@ internal sealed class WindowMover
     }
 
     private readonly SettingsStore store;
+    private readonly WindowMemoryStore memory;
     private readonly SynchronizationContext ui;
     private readonly Overlays overlays = new();
 
@@ -34,7 +35,19 @@ internal sealed class WindowMover
     // Which edges a resize moves: -1 for left/top, 1 for right/bottom.
     private double resizeDirX = 1;
     private double resizeDirY = 1;
+    private bool dimmed;
     private Rect? lastFrame;
+    // The window's app, to remember where its windows were on each display.
+    private string? app;
+    private bool resizable;
+    // The frame when the operation began, until the window is dragged to
+    // another display, when it's remembered as its frame on the first one.
+    private Rect? beginFrame;
+    // The display under the pointer while moving.
+    private string? moveDisplay;
+    // The size a moved window took from the display it was dragged onto,
+    // which the app may change when that display has another scale.
+    private bool keepSize;
     // The display scale where the operation started.
     private double scale = 1;
     private List<Rect> workAreas = [];
@@ -43,15 +56,18 @@ internal sealed class WindowMover
     // MARK: State on the hook thread
 
     private int updatePending;
+    // Whether the button is held down with the keys, to snap to the grid.
+    private volatile bool gridClick;
     private readonly SwipeTracker swipe = new();
     private double lastWheelSend = double.NegativeInfinity;
     private double lastSwipeEvent = double.NegativeInfinity;
     // Arrow keys whose key down was swallowed, so their key up is too.
     private readonly HashSet<int> swallowedKeys = [];
 
-    public WindowMover(SettingsStore store, SynchronizationContext ui)
+    public WindowMover(SettingsStore store, WindowMemoryStore memory, SynchronizationContext ui)
     {
         this.store = store;
+        this.memory = memory;
         this.ui = ui;
         settings = store.Current;
     }
@@ -76,27 +92,38 @@ internal sealed class WindowMover
         if (op == Op.None) settings = store.Current;
 
         var point = Native.CursorPosition();
-        var newOp = settings.Enabled ? OpForModifiers(InputHooks.CurrentModifiers()) : Op.None;
+        var action = settings.Enabled ? settings.Action(InputHooks.CurrentModifiers()) : KeyAction.None;
+        var newOp = action switch
+        {
+            KeyAction.Move => Op.Move,
+            KeyAction.Resize => Op.Resize,
+            _ => Op.None,
+        };
 
         if (newOp != op)
         {
             EndOperation();
             if (newOp != Op.None) BeginOperation(newOp, point);
-            return;
         }
-
-        switch (op)
+        else
         {
-            case Op.Move: UpdateMove(point); break;
-            case Op.Resize: UpdateResize(point); break;
+            switch (op)
+            {
+                case Op.Move: UpdateMove(point); break;
+                case Op.Resize: UpdateResize(point); break;
+            }
         }
+        UpdateDimmer();
     }
 
-    private Op OpForModifiers(Modifier held)
+    // The other windows are dimmed while snapping to the grid.
+    private void UpdateDimmer()
     {
-        if (settings.ResizeKeys != Modifier.None && held == settings.ResizeKeys) return Op.Resize;
-        if (settings.MoveKeys != Modifier.None && held == settings.MoveKeys) return Op.Move;
-        return Op.None;
+        var dim = op != Op.None && gridClick && settings.DimWindows && window != null;
+        if (dim == dimmed) return;
+        if (dim) overlays.ShowDimmer(below: window!.Handle);
+        else overlays.HideDimmer();
+        dimmed = dim;
     }
 
     private void BeginOperation(Op newOp, Point point, ManagedWindow? target = null)
@@ -127,6 +154,11 @@ internal sealed class WindowMover
         start = point;
         startRect = rect;
         lastFrame = rect;
+        app = w.App;
+        resizable = w.CanResize;
+        beginFrame = rect;
+        moveDisplay = Displays.At(point)?.Id;
+        keepSize = false;
         grabRatio = new Point((point.X - grabbed.MinX) / grabbed.Width, (point.Y - grabbed.MinY) / grabbed.Height);
         scale = Native.ScaleAt(point);
 
@@ -145,16 +177,22 @@ internal sealed class WindowMover
 
         if (settings.RaiseWindow) w.Raise();
 
-        if (settings.GridEnabled && settings.DimWindows) overlays.ShowDimmer(below: w.Handle);
-
         // A maximized window being moved jumps under the pointer right away.
         if (op == Op.Move && rect != grabbed) UpdateMove(point);
     }
 
     private void EndOperation()
     {
+        if (op != Op.None && window != null && lastFrame != beginFrame && window.Frame is { } frame)
+        {
+            Remember(frame, app);
+        }
         op = Op.None;
         window = null;
+        app = null;
+        beginFrame = null;
+        moveDisplay = null;
+        dimmed = false;
         workAreas = [];
         otherRects = [];
         overlays.HideAll();
@@ -163,19 +201,60 @@ internal sealed class WindowMover
     private void UpdateMove(Point point)
     {
         if (window == null) return;
-        // The app may change its size on a display with another scale.
-        var current = window.Frame ?? startRect;
-        double width = current.Width, height = current.Height;
+        EnterDisplay(point);
+        double width = startRect.Width, height = startRect.Height;
         var x = Geometry.Round(point.X - grabRatio.X * width);
         var y = Geometry.Round(point.Y - grabRatio.Y * height);
 
-        x += Snap([x, x + width], SnapLinesX(y, height, point));
-        y += Snap([y, y + height], SnapLinesY(x, width, point));
+        var grid = CurrentGrid(point);
+        x += Snap([x, x + width], SnapLinesX(y, height, grid), grid);
+        y += Snap([y, y + height], SnapLinesY(x, width, grid), grid);
 
         var frame = new Rect(x, y, width, height);
         if (frame == lastFrame) return;
+        var resized = lastFrame is not { } last || last.Width != width || last.Height != height;
         lastFrame = frame;
-        if (!window.SetOrigin(frame.Origin)) EndOperation();
+        if (!(resized ? window.SetFrame(frame) : window.SetOrigin(frame.Origin)))
+        {
+            EndOperation();
+            return;
+        }
+
+        // Apps change their size when they land on a display with another
+        // scale. Follow them, except for a size taken from that display,
+        // which they get again once.
+        if (window.Frame is { } actual && (actual.Width != width || actual.Height != height))
+        {
+            if (keepSize)
+            {
+                keepSize = false;
+                window.SetFrame(frame);
+            }
+            else
+            {
+                startRect = startRect with { Width = actual.Width, Height = actual.Height };
+                lastFrame = actual;
+            }
+        }
+    }
+
+    // When a drag crosses onto another display, takes the size its app's
+    // windows last had there, keeping the pointer at the same spot in it.
+    private void EnterDisplay(Point point)
+    {
+        if (Displays.At(point) is not { } display || display.Id == moveDisplay) return;
+        moveDisplay = display.Id;
+        if (beginFrame is { } frame)
+        {
+            Remember(frame, app);
+            beginFrame = null;
+        }
+        if (resizable && Remembered(app, display) is { } remembered)
+        {
+            var restored = remembered.Restored(display.WorkArea, keepSize: false);
+            startRect = startRect with { Width = restored.Width, Height = restored.Height };
+            keepSize = true;
+        }
     }
 
     private void UpdateResize(Point point)
@@ -190,11 +269,12 @@ internal sealed class WindowMover
         if (resizeDirX > 0) right += dx; else left += dx;
         if (resizeDirY > 0) bottom += dy; else top += dy;
 
-        var linesX = SnapLinesX(top, bottom - top, point);
-        if (resizeDirX > 0) right += Snap([right], linesX); else left += Snap([left], linesX);
+        var grid = CurrentGrid(point);
+        var linesX = SnapLinesX(top, bottom - top, grid);
+        if (resizeDirX > 0) right += Snap([right], linesX, grid); else left += Snap([left], linesX, grid);
 
-        var linesY = SnapLinesY(left, right - left, point);
-        if (resizeDirY > 0) bottom += Snap([bottom], linesY); else top += Snap([top], linesY);
+        var linesY = SnapLinesY(left, right - left, grid);
+        if (resizeDirY > 0) bottom += Snap([bottom], linesY, grid); else top += Snap([top], linesY, grid);
 
         var minWidth = MinWidth * scale;
         var minHeight = MinHeight * scale;
@@ -229,16 +309,33 @@ internal sealed class WindowMover
         if (origin != actual.Origin) window.SetOrigin(origin);
     }
 
-    // MARK: Sending to another display (hook thread)
+    // MARK: Hook thread
+
+    private static double Now => Environment.TickCount64 / 1000.0;
+
+    // Pressing the button while holding the keys snaps to the grid until
+    // it's released. The app under the pointer gets neither.
+    public bool HandleClick(bool down)
+    {
+        if (!down)
+        {
+            if (!gridClick) return false;
+            gridClick = false;
+            ScheduleUpdate();
+            return true;
+        }
+        var current = store.Current;
+        if (!current.Enabled || current.Action(InputHooks.CurrentModifiers()) == KeyAction.None) return false;
+        gridClick = true;
+        ScheduleUpdate();
+        return true;
+    }
 
     private bool HoldsMoveKeys()
     {
         var current = store.Current;
-        return current.Enabled && current.MoveKeys != Modifier.None
-            && InputHooks.CurrentModifiers() == current.MoveKeys;
+        return current.Enabled && current.Action(InputHooks.CurrentModifiers()) == KeyAction.Move;
     }
-
-    private static double Now => Environment.TickCount64 / 1000.0;
 
     public bool HandleWheel(int delta, bool horizontal, Point _)
     {
@@ -328,16 +425,22 @@ internal sealed class WindowMover
             frame = restored;
         }
 
-        var area = displays[index].WorkArea;
-        var resizable = w.CanResize;
-        var newFrame = Geometry.Transfer(frame, displays[from].WorkArea, area, keepSize: !resizable);
-        if (settings.GridEnabled && resizable)
+        var display = displays[index];
+        var area = display.WorkArea;
+        var canResize = w.CanResize;
+        var windowApp = w.App;
+        Remember(frame, windowApp);
+        // Where its app's windows last were on that display, or the same
+        // relative place and size as here.
+        var newFrame = Remembered(windowApp, display)?.Restored(area, keepSize: !canResize)
+            ?? Geometry.Transfer(frame, displays[from].WorkArea, area, keepSize: !canResize);
+        if (gridClick && canResize)
         {
-            var (columns, rows) = settings.GridSize(displays[index].Id);
+            var (columns, rows) = display.Grid(settings);
             newFrame = Geometry.FitToGrid(newFrame, area, columns, rows);
         }
 
-        if (resizable)
+        if (canResize)
         {
             if (!w.SetFrame(newFrame)) return;
             // Apps adjust their size to the scale of the display they land on: insist once.
@@ -360,6 +463,24 @@ internal sealed class WindowMover
         if (moving) BeginOperation(Op.Move, newPoint, w);
     }
 
+    // MARK: Remembering frames per display
+
+    // Records `frame` as where the app's windows last were on the display
+    // that holds most of it (the one under its center).
+    private void Remember(Rect frame, string? windowApp)
+    {
+        var center = new Point(frame.MidX, frame.MidY);
+        if (!settings.RememberFrames || windowApp == null
+            || Displays.All().FirstOrDefault(d => d.Bounds.Contains(center)) is not { } display)
+        {
+            return;
+        }
+        memory.Update(m => m.Remember(frame, display.WorkArea, windowApp, display.Id));
+    }
+
+    private RememberedFrame? Remembered(string? windowApp, Display display) =>
+        settings.RememberFrames && windowApp != null ? memory.Current.Frame(windowApp, display.Id) : null;
+
     // MARK: Snapping
 
     // Records the displays' work areas and the other windows' frames.
@@ -374,21 +495,17 @@ internal sealed class WindowMover
 
     private double SnapThreshold => settings.SnapThreshold * scale;
 
-    private double Snap(double[] edges, IReadOnlyList<double> lines)
+    private double Snap(double[] edges, IReadOnlyList<double> lines, Grid? grid)
     {
         // The grid always snaps; edge snapping only within the threshold.
-        var threshold = settings.GridEnabled ? double.PositiveInfinity : SnapThreshold;
+        var threshold = grid != null ? double.PositiveInfinity : SnapThreshold;
         return threshold > 0 ? Geometry.SnapDelta(edges, lines, threshold) : 0;
     }
 
     // Vertical lines a window spanning [top, top + height] can snap to.
-    private List<double> SnapLinesX(double top, double height, Point point)
+    private List<double> SnapLinesX(double top, double height, Grid? grid)
     {
-        if (settings.GridEnabled)
-        {
-            var (area, columns, _) = CurrentGrid(point);
-            return [.. Geometry.Divide(area.MinX, area.Width, columns)];
-        }
+        if (grid is { } g) return [.. Geometry.Divide(g.Area.MinX, g.Area.Width, g.Columns)];
 
         var lines = workAreas.SelectMany(a => new[] { a.MinX, a.MaxX }).ToList();
         if (settings.SnapToWindows)
@@ -404,13 +521,9 @@ internal sealed class WindowMover
     }
 
     // Horizontal lines a window spanning [left, left + width] can snap to.
-    private List<double> SnapLinesY(double left, double width, Point point)
+    private List<double> SnapLinesY(double left, double width, Grid? grid)
     {
-        if (settings.GridEnabled)
-        {
-            var (area, _, rows) = CurrentGrid(point);
-            return [.. Geometry.Divide(area.MinY, area.Height, rows)];
-        }
+        if (grid is { } g) return [.. Geometry.Divide(g.Area.MinY, g.Area.Height, g.Rows)];
 
         var lines = workAreas.SelectMany(a => new[] { a.MinY, a.MaxY }).ToList();
         if (settings.SnapToWindows)
@@ -425,13 +538,19 @@ internal sealed class WindowMover
         return lines;
     }
 
-    // The grid follows the display under the pointer, with that display's size.
-    private (Rect Area, int Columns, int Rows) CurrentGrid(Point point)
+    private readonly record struct Grid(Rect Area, int Columns, int Rows);
+
+    // The grid of the display under the pointer while the button is held,
+    // or null (edge snapping then applies).
+    private Grid? CurrentGrid(Point point)
     {
-        var display = Displays.At(point);
-        var area = display?.WorkArea ?? workAreas.FirstOrDefault();
-        var (columns, rows) = settings.GridSize(display?.Id);
-        if (settings.ShowGrid) overlays.ShowGrid(area, columns, rows);
-        return (area, columns, rows);
+        if (!gridClick || Displays.At(point) is not { } display)
+        {
+            overlays.HideGrid();
+            return null;
+        }
+        var (columns, rows) = display.Grid(settings);
+        if (settings.ShowGrid) overlays.ShowGrid(display.WorkArea, columns, rows);
+        return new Grid(display.WorkArea, columns, rows);
     }
 }

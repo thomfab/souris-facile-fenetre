@@ -13,16 +13,18 @@ internal sealed class App : ApplicationContext
     public static Icon Icon { get; } = LoadIcon(32);
 
     private readonly SettingsStore store;
+    private readonly WindowMemoryStore memory;
     private readonly WindowMover mover;
     private readonly InputHooks hooks = new();
     private readonly NotifyIcon trayIcon;
     private readonly ToolStripMenuItem enabledItem;
     private SettingsForm? settingsForm;
 
-    public App(SettingsStore store)
+    public App(SettingsStore store, WindowMemoryStore memory)
     {
         this.store = store;
-        mover = new WindowMover(store, SynchronizationContext.Current!);
+        this.memory = memory;
+        mover = new WindowMover(store, memory, SynchronizationContext.Current!);
 
         enabledItem = new ToolStripMenuItem("Enabled", null, (_, _) => ToggleEnabled());
         var menu = new ContextMenuStrip();
@@ -52,6 +54,7 @@ internal sealed class App : ApplicationContext
         hooks.Changed = mover.ScheduleUpdate;
         hooks.Key = mover.HandleKey;
         hooks.Wheel = mover.HandleWheel;
+        hooks.Click = mover.HandleClick;
         hooks.Start();
 
         SystemEvents.DisplaySettingsChanged += OnDisplaysChanged;
@@ -90,7 +93,7 @@ internal sealed class App : ApplicationContext
     {
         if (settingsForm == null || settingsForm.IsDisposed)
         {
-            settingsForm = new SettingsForm(store);
+            settingsForm = new SettingsForm(store, memory);
         }
         settingsForm.Show();
         if (settingsForm.WindowState == FormWindowState.Minimized) settingsForm.WindowState = FormWindowState.Normal;

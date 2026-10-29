@@ -4,14 +4,20 @@ using static SourisFacile.Native;
 namespace SourisFacile;
 
 // A connected display. `Id` identifies the physical display and stays the
-// same when it's unplugged and plugged back in, or after a restart.
-internal sealed record Display(string Id, string Name, Rect Bounds, Rect WorkArea);
+// same when it's unplugged and plugged back in, or after a restart. `Scale`
+// is 1 at 100%.
+internal sealed record Display(string Id, string Name, bool IsBuiltIn, Rect Bounds, Rect WorkArea, double Scale)
+{
+    // The grid of this display in `settings`, which suits its size if it was never set.
+    public (int Columns, int Rows) Grid(Settings settings) =>
+        settings.Grid(Id, Bounds.Width / Scale, Bounds.Height / Scale);
+}
 
 internal static class Displays
 {
     // Device names (\\.\DISPLAY1) to IDs and names, which take a while to
     // read: refreshed when the displays change.
-    private static Dictionary<string, (string Id, string Name)>? identities;
+    private static Dictionary<string, (string Id, string Name, bool IsBuiltIn)>? identities;
 
     public static void Invalidate() => identities = null;
 
@@ -25,10 +31,11 @@ internal static class Displays
             var info = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
             if (GetMonitorInfo(monitor, ref info))
             {
-                var (id, name) = known.TryGetValue(info.szDevice, out var identity)
+                var (id, name, builtIn) = known.TryGetValue(info.szDevice, out var identity)
                     ? identity
-                    : (info.szDevice, info.szDevice.TrimStart('\\', '.'));
-                displays.Add(new Display(id, name, info.rcMonitor.ToRect(), info.rcWork.ToRect()));
+                    : (info.szDevice, info.szDevice.TrimStart('\\', '.'), false);
+                var scale = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, out var dpi, out _) == 0 ? dpi / 96.0 : 1;
+                displays.Add(new Display(id, name, builtIn, info.rcMonitor.ToRect(), info.rcWork.ToRect(), scale));
             }
             return true;
         }, IntPtr.Zero);
@@ -56,6 +63,11 @@ internal static class Displays
     private const uint QDC_ONLY_ACTIVE_PATHS = 2;
     private const int GET_SOURCE_NAME = 1;
     private const int GET_TARGET_NAME = 2;
+    // Output technologies of a laptop's own screen.
+    private const int OUTPUT_INTERNAL = unchecked((int)0x80000000);
+    private const int OUTPUT_LVDS = 6;
+    private const int OUTPUT_DISPLAYPORT_EMBEDDED = 11;
+    private const int OUTPUT_UDI_EMBEDDED = 13;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct LUID
@@ -149,9 +161,9 @@ internal static class Displays
     private static extern int DisplayConfigGetDeviceInfo(ref TargetDeviceName request);
 
     // The monitor's device path makes the ID, and its EDID gives the name.
-    private static Dictionary<string, (string, string)> ReadIdentities()
+    private static Dictionary<string, (string, string, bool)> ReadIdentities()
     {
-        var result = new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, (string, string, bool)>(StringComparer.OrdinalIgnoreCase);
         if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, out var pathCount, out var modeCount) != 0)
         {
             return result;
@@ -190,10 +202,11 @@ internal static class Displays
             {
                 continue;
             }
-            var name = string.IsNullOrWhiteSpace(target.monitorFriendlyDeviceName)
-                ? "Built-in display"
-                : target.monitorFriendlyDeviceName;
-            result.TryAdd(source.viewGdiDeviceName, (target.monitorDevicePath, name));
+            var builtIn = target.outputTechnology is OUTPUT_INTERNAL or OUTPUT_LVDS or OUTPUT_DISPLAYPORT_EMBEDDED or OUTPUT_UDI_EMBEDDED;
+            var name = !string.IsNullOrWhiteSpace(target.monitorFriendlyDeviceName) ? target.monitorFriendlyDeviceName
+                : builtIn ? "Built-in display"
+                : "Display";
+            result.TryAdd(source.viewGdiDeviceName, (target.monitorDevicePath, name, builtIn));
         }
         return result;
     }

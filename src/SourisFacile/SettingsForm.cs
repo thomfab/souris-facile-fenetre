@@ -3,28 +3,38 @@ using Microsoft.Win32;
 
 namespace SourisFacile;
 
+// The settings, with a page per topic in a sidebar, then one per connected
+// display and one for unplugged displays.
 internal sealed class SettingsForm : Form
 {
     private const int ContentWidth = 470;
 
-    private readonly SettingsStore store;
-    private readonly GridPreview preview = new();
-    private readonly FlowLayoutPanel root;
-    private readonly Dictionary<Modifier, CheckBox> moveBoxes = [];
-    private readonly Dictionary<Modifier, CheckBox> resizeBoxes = [];
-    private readonly Label warnings;
-    private readonly GroupBox sendGroup;
-    private readonly GroupBox snapGroup;
-    private readonly CheckBox gridEnabled;
-    private readonly GridSizeFields defaultGrid;
-    private readonly CheckBox showGrid;
-    private readonly CheckBox dimWindows;
-    private readonly FlowLayoutPanel displaysPanel;
+    private abstract record Page
+    {
+        public sealed record General : Page;
+        public sealed record Move : Page;
+        public sealed record Resize : Page;
+        public sealed record Snapping : Page;
+        public sealed record Send : Page;
+        public sealed record OfDisplay(string Id) : Page;
+        public sealed record Unplugged : Page;
+    }
 
-    public SettingsForm(SettingsStore store)
+    private readonly SettingsStore store;
+    private readonly WindowMemoryStore memory;
+    private readonly GridPreview preview = new();
+    private readonly TreeView sidebar;
+    private readonly FlowLayoutPanel content;
+    private Page page = new Page.General();
+    private List<Display> displays = Displays.All();
+    // Controls whose state follows the settings while the page is shown.
+    private Label? warnings;
+    private Control? sendSection;
+
+    public SettingsForm(SettingsStore store, WindowMemoryStore memory)
     {
         this.store = store;
-        var s = store.Current;
+        this.memory = memory;
 
         Text = $"{App.Name} Settings";
         Icon = App.Icon;
@@ -34,48 +44,156 @@ internal sealed class SettingsForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(ContentWidth + 40, 720);
+        ClientSize = new Size(ContentWidth + 260, 540);
         Font = SystemFonts.MessageBoxFont ?? Font;
 
-        root = new FlowLayoutPanel
+        content = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             AutoScroll = true,
-            Padding = new Padding(10),
+            Padding = new Padding(12),
         };
-        Controls.Add(root);
-
-        // Move and resize keys
-        root.Controls.Add(Section("Move",
-            "Hold these keys and move the mouse to move the window under the pointer. Turn all off to disable.",
-            ModifierBoxes(moveBoxes, s.MoveModifiers, (settings, value) => settings with { MoveModifiers = value })));
-        root.Controls.Add(Section("Resize",
-            "Hold these keys and move the mouse to resize the window under the pointer. Turn all off to disable.",
-            ModifierBoxes(resizeBoxes, s.ResizeModifiers, (settings, value) => settings with { ResizeModifiers = value })));
-
-        warnings = new Label
+        sidebar = new TreeView
         {
-            AutoSize = true,
-            MaximumSize = new Size(ContentWidth, 0),
-            ForeColor = Color.DarkOrange,
-            Margin = new Padding(3, 0, 3, 10),
+            Dock = DockStyle.Left,
+            Width = 210,
+            FullRowSelect = true,
+            HideSelection = false,
+            ShowLines = false,
+            ShowPlusMinus = false,
+            ShowRootLines = false,
+            ItemHeight = 26,
+            BorderStyle = BorderStyle.None,
+            BackColor = SystemColors.Control,
         };
-        root.Controls.Add(warnings);
+        sidebar.BeforeCollapse += (_, e) => e.Cancel = true;
+        sidebar.AfterSelect += (_, e) =>
+        {
+            if (e.Node?.Tag is Page selected)
+            {
+                if (selected != page || content.Controls.Count == 0) Show(selected);
+            }
+            else if (e.Node?.FirstNode is { } first) sidebar.SelectedNode = first;
+        };
+        Controls.Add(content);
+        Controls.Add(sidebar);
 
-        // Sending to another display
-        sendGroup = Section("Send to Another Display",
-            "Hold the move keys over a window and swipe, scroll or press an arrow key. The window keeps its relative place and size, fits the grid of the display it lands on, and the pointer goes with it.",
-            Toggle("Swipe or scroll", s.SendWithScroll, (settings, on) => settings with { SendWithScroll = on }),
-            Hint("Swipe two fingers on a touchpad toward a display. A mouse wheel goes to the next or previous display."),
-            Toggle("Reverse swipes", s.ReverseSwipes, (settings, on) => settings with { ReverseSwipes = on }),
-            Hint("Turn on if the touchpad is set to \"Down motion scrolls down\" and windows go the wrong way."),
-            Toggle("Arrow keys", s.SendWithArrows, (settings, on) => settings with { SendWithArrows = on }),
-            Hint("Press an arrow key to go to the display in that direction."));
-        root.Controls.Add(sendGroup);
+        store.Changed += OnSettingsChanged;
+        memory.Changed += OnMemoryChanged;
+        SystemEvents.DisplaySettingsChanged += OnDisplaysChanged;
+        RebuildSidebar();
+    }
 
-        // Behavior
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            store.Changed -= OnSettingsChanged;
+            memory.Changed -= OnMemoryChanged;
+            SystemEvents.DisplaySettingsChanged -= OnDisplaysChanged;
+            preview.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    private void OnSettingsChanged() => RunOnUi(RefreshStates);
+
+    // Moving windows around changes the remembered sizes shown.
+    private void OnMemoryChanged() => RunOnUi(() =>
+    {
+        if (page is Page.Send or Page.OfDisplay && !content.ContainsFocus) Show(page);
+    });
+
+    private void OnDisplaysChanged(object? sender, EventArgs e) => RunOnUi(() =>
+    {
+        displays = Displays.All();
+        RebuildSidebar();
+    });
+
+    private void RunOnUi(Action action)
+    {
+        if (!IsHandleCreated || IsDisposed) return;
+        if (InvokeRequired) BeginInvoke(action); else action();
+    }
+
+    // MARK: Sidebar
+
+    private void RebuildSidebar()
+    {
+        sidebar.BeginUpdate();
+        sidebar.Nodes.Clear();
+        TreeNode? selected = null;
+        TreeNode Node(TreeNodeCollection nodes, string text, Page tag)
+        {
+            var node = nodes.Add(text);
+            node.Tag = tag;
+            if (tag == page) selected = node;
+            return node;
+        }
+        Node(sidebar.Nodes, "General", new Page.General());
+        Node(sidebar.Nodes, "Move", new Page.Move());
+        Node(sidebar.Nodes, "Resize", new Page.Resize());
+        Node(sidebar.Nodes, "Snapping", new Page.Snapping());
+        Node(sidebar.Nodes, "Send to Display", new Page.Send());
+        var displaysNode = sidebar.Nodes.Add("Displays");
+        displaysNode.NodeFont = new Font(sidebar.Font, FontStyle.Bold);
+        foreach (var display in displays)
+        {
+            Node(displaysNode.Nodes, display.Name, new Page.OfDisplay(display.Id));
+        }
+        if (Unplugged().Count > 0) Node(displaysNode.Nodes, "Unplugged Displays", new Page.Unplugged());
+        sidebar.ExpandAll();
+        sidebar.EndUpdate();
+
+        // The display shown may have been unplugged.
+        sidebar.SelectedNode = selected ?? sidebar.Nodes[0];
+        Show((Page)sidebar.SelectedNode.Tag);
+    }
+
+    private void Show(Page newPage)
+    {
+        page = newPage;
+        warnings = null;
+        sendSection = null;
+        content.SuspendLayout();
+        foreach (var control in content.Controls.Cast<Control>().ToList()) control.Dispose();
+        content.Controls.Clear();
+        var s = store.Current;
+        switch (page)
+        {
+            case Page.General: GeneralPage(s); break;
+            case Page.Move: MovePage(s); break;
+            case Page.Resize: ResizePage(s); break;
+            case Page.Snapping: SnappingPage(s); break;
+            case Page.Send: SendPage(s); break;
+            case Page.OfDisplay(var id):
+                if (displays.FirstOrDefault(d => d.Id == id) is { } display) DisplayPage(display);
+                else Add(Hint("This display isn't plugged in anymore."));
+                break;
+            case Page.Unplugged: UnpluggedPage(); break;
+        }
+        content.ResumeLayout();
+        RefreshStates();
+    }
+
+    private void RefreshStates()
+    {
+        var s = store.Current;
+        if (warnings != null)
+        {
+            var list = Modifiers.Warnings(s.MoveModifiers, s.ResizeModifiers);
+            warnings.Text = string.Join("\n", list.Select(w => "⚠ " + w));
+            warnings.Visible = list.Count > 0;
+        }
+        if (sendSection != null) sendSection.Enabled = s.MoveKeys != Modifier.None;
+    }
+
+    // MARK: Pages
+
+    private void GeneralPage(Settings s)
+    {
         var login = new CheckBox { Text = "Launch at login", AutoSize = true, Checked = Startup.IsEnabled };
         login.CheckedChanged += (_, _) =>
         {
@@ -88,13 +206,47 @@ internal sealed class SettingsForm : Form
                 login.Checked = Startup.IsEnabled;
             }
         };
-        root.Controls.Add(Section("Behavior", null,
+        Add(Section(null, null,
+            Toggle("Enabled", s.Enabled, (settings, on) => settings with { Enabled = on }),
+            login,
             Toggle("Raise window", s.RaiseWindow, (settings, on) => settings with { RaiseWindow = on }),
+            Hint("Bring the window to the front when you start moving or resizing it.")));
+    }
+
+    private void MovePage(Settings s)
+    {
+        Add(Section("Keys",
+            "Hold these keys and move the mouse to move the window under the pointer. Turn all off to disable.",
+            ModifierBoxes(s.MoveModifiers, (settings, value) => settings with { MoveModifiers = value })));
+        AddWarnings();
+    }
+
+    private void ResizePage(Settings s)
+    {
+        Add(Section("Keys",
+            "Hold these keys and move the mouse to resize the window under the pointer. Turn all off to disable.",
+            ModifierBoxes(s.ResizeModifiers, (settings, value) => settings with { ResizeModifiers = value })));
+        AddWarnings();
+        Add(Section(null, null,
             Toggle("Resize from nearest corner", s.ResizeNearestCorner,
                 (settings, on) => settings with { ResizeNearestCorner = on }),
-            login));
+            Hint("Otherwise always from the bottom-right corner.")));
+    }
 
-        // Edge snapping
+    private void AddWarnings()
+    {
+        warnings = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(ContentWidth, 0),
+            ForeColor = Color.DarkOrange,
+            Margin = new Padding(3, 0, 3, 10),
+        };
+        Add(warnings);
+    }
+
+    private void SnappingPage(Settings s)
+    {
         var distance = new NumericUpDown
         {
             Minimum = 0,
@@ -103,155 +255,107 @@ internal sealed class SettingsForm : Form
             Width = 70,
         };
         distance.ValueChanged += (_, _) => store.Update(settings => settings with { SnapThreshold = (int)distance.Value });
-        snapGroup = Section("Edge Snapping",
-            "Window edges snap to display edges when they come close. The distance is in pixels at 100% scale, and 0 turns edge snapping off. Not used while the grid is on.",
+        Add(Section("Edge Snapping",
+            "Window edges snap to display edges when they come close. The distance is in pixels at 100% scale, and 0 turns edge snapping off.",
             Row(new Label { Text = "Snap distance:", AutoSize = true, Anchor = AnchorStyles.Left }, distance),
-            Toggle("Snap to other windows", s.SnapToWindows, (settings, on) => settings with { SnapToWindows = on }));
-        root.Controls.Add(snapGroup);
+            Toggle("Snap to other windows", s.SnapToWindows, (settings, on) => settings with { SnapToWindows = on })));
 
-        // Grid
-        gridEnabled = Toggle("Snap to grid", s.GridEnabled, (settings, on) => settings with { GridEnabled = on });
-        defaultGrid = new GridSizeFields("Default grid size", s.GridColumns, s.GridRows);
-        defaultGrid.Changed += (columns, rows) =>
+        Add(Section("Grid",
+            "While moving or resizing, press and hold the click (with the keys still held) to snap window edges to the grid of the display under the pointer. Each display's grid is set on its own page.",
+            Toggle("Show grid", s.ShowGrid, (settings, on) => settings with { ShowGrid = on }),
+            Toggle("Dim other windows", s.DimWindows, (settings, on) => settings with { DimWindows = on })));
+    }
+
+    private void SendPage(Settings s)
+    {
+        sendSection = Section(null,
+            "Hold the move keys over a window and swipe, scroll or press an arrow key. The pointer goes with the window.",
+            Toggle("Swipe or scroll", s.SendWithScroll, (settings, on) => settings with { SendWithScroll = on }),
+            Hint("Swipe two fingers on a touchpad toward a display. A mouse wheel goes to the next or previous display."),
+            Toggle("Reverse swipes", s.ReverseSwipes, (settings, on) => settings with { ReverseSwipes = on }),
+            Hint("Turn on if the touchpad is set to \"Down motion scrolls down\" and windows go the wrong way."),
+            Toggle("Arrow keys", s.SendWithArrows, (settings, on) => settings with { SendWithArrows = on }),
+            Hint("Press an arrow key to go to the display in that direction."));
+        Add(sendSection);
+
+        var forget = new Button { Text = "Forget All Remembered Sizes", AutoSize = true, Enabled = !memory.Current.IsEmpty };
+        forget.Click += (_, _) => memory.Update(_ => new WindowMemory());
+        Add(Section("Window Sizes", null,
+            Toggle("Remember window sizes per display", s.RememberFrames,
+                (settings, on) => settings with { RememberFrames = on }),
+            Hint("A window sent or dragged to a display gets the size and place its app's windows last had there. Otherwise it keeps its relative place and size."),
+            forget));
+    }
+
+    private void DisplayPage(Display display)
+    {
+        var (columns, rows) = display.Grid(store.Current);
+        var fields = new GridSizeFields("Grid size", columns, rows);
+        fields.Changed += (newColumns, newRows) =>
         {
-            store.Update(settings => settings with { GridColumns = columns, GridRows = rows });
-            RebuildDisplays();
+            store.Update(settings => settings.WithDisplayGrid(display.Id,
+                new DisplayGrid(display.Name, newColumns, newRows)));
+            PreviewGrid(display);
         };
-        showGrid = Toggle("Show grid", s.ShowGrid, (settings, on) => settings with { ShowGrid = on });
-        dimWindows = Toggle("Dim other windows", s.DimWindows, (settings, on) => settings with { DimWindows = on });
-        root.Controls.Add(Section("Grid",
-            "Divide each display into a grid. Moved and resized edges always snap to its lines. Displays without their own grid size use the default one.",
-            gridEnabled, defaultGrid, showGrid, dimWindows));
+        var previewButton = new Button { Text = "Preview Grid", AutoSize = true };
+        previewButton.Click += (_, _) => PreviewGrid(display);
+        Add(Section("Grid",
+            "Windows snap to it while you hold the click. Remembered for this display, and used again whenever it's plugged in. A new display gets a grid suiting its size.",
+            fields, previewButton));
 
-        displaysPanel = new FlowLayoutPanel
+        var count = memory.Current.Count(display.Id);
+        var forget = new Button { Text = "Forget", AutoSize = true, Enabled = count > 0 };
+        forget.Click += (_, _) => memory.Update(m => m.Forget(display.Id));
+        Add(Section("Remembered Window Sizes",
+            "Where apps' windows last were on this display, used when a window is sent or dragged here.",
+            Row(new Label { Text = count == 1 ? "1 app" : $"{count} apps", AutoSize = true, Anchor = AnchorStyles.Left, Width = 120 },
+                forget)));
+    }
+
+    private void UnpluggedPage()
+    {
+        var rows = Unplugged().Select(entry =>
         {
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            AutoSize = true,
-            Margin = Padding.Empty,
-        };
-        root.Controls.Add(displaysPanel);
-
-        store.Changed += OnSettingsChanged;
-        SystemEvents.DisplaySettingsChanged += OnDisplaysChanged;
-        RebuildDisplays();
-        RefreshStates();
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            store.Changed -= OnSettingsChanged;
-            SystemEvents.DisplaySettingsChanged -= OnDisplaysChanged;
-            preview.Dispose();
-        }
-        base.Dispose(disposing);
-    }
-
-    private void OnSettingsChanged()
-    {
-        if (InvokeRequired) BeginInvoke(RefreshStates); else RefreshStates();
-    }
-
-    private void OnDisplaysChanged(object? sender, EventArgs e)
-    {
-        if (IsHandleCreated) BeginInvoke(RebuildDisplays);
-    }
-
-    private void RefreshStates()
-    {
-        var s = store.Current;
-        var list = Modifiers.Warnings(s.MoveModifiers, s.ResizeModifiers);
-        warnings.Text = string.Join("\n", list.Select(w => "⚠ " + w));
-        warnings.Visible = list.Count > 0;
-        sendGroup.Enabled = s.MoveKeys != Modifier.None;
-        snapGroup.Enabled = !s.GridEnabled;
-        defaultGrid.Enabled = showGrid.Enabled = dimWindows.Enabled = s.GridEnabled;
-        displaysPanel.Enabled = s.GridEnabled;
+            var forget = new Button { Text = "Forget", AutoSize = true };
+            forget.Click += (_, _) =>
+            {
+                store.Update(settings => settings.WithDisplayGrid(entry.Key, null));
+                memory.Update(m => m.Forget(entry.Key));
+                BeginInvoke(RebuildSidebar);
+            };
+            var label = new Label
+            {
+                Text = $"{entry.Value.Name} — Grid {entry.Value.Columns} × {entry.Value.Rows}",
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+            };
+            return (Control)Row(label, forget);
+        }).ToArray();
+        Add(Section(null,
+            "Settings of displays that aren't plugged in. They apply again as soon as the display is. Forgetting a display also forgets its remembered window sizes.",
+            rows));
     }
 
     // MARK: Displays
 
-    private void RebuildDisplays()
-    {
-        var s = store.Current;
-        var displays = Displays.All();
-        displaysPanel.SuspendLayout();
-        foreach (Control control in displaysPanel.Controls.Cast<Control>().ToList()) control.Dispose();
-        displaysPanel.Controls.Clear();
-
-        foreach (var display in displays)
-        {
-            var ownGrid = s.DisplayGrids.GetValueOrDefault(display.Id);
-            var own = new CheckBox { Text = "Own grid size", AutoSize = true, Checked = ownGrid != null };
-            own.CheckedChanged += (_, _) =>
-            {
-                store.Update(settings => settings.WithDisplayGrid(display.Id,
-                    own.Checked ? new DisplayGrid(display.Name, settings.GridColumns, settings.GridRows) : null));
-                BeginInvoke(RebuildDisplays);
-            };
-            var controls = new List<Control>
-            {
-                own,
-                Hint($"Otherwise uses the default, {s.GridColumns} × {s.GridRows}."),
-            };
-            if (ownGrid != null)
-            {
-                var fields = new GridSizeFields("Grid size", ownGrid.Columns, ownGrid.Rows);
-                fields.Changed += (columns, rows) =>
-                {
-                    store.Update(settings => settings.WithDisplayGrid(display.Id,
-                        new DisplayGrid(display.Name, columns, rows)));
-                    PreviewGrid(display);
-                };
-                controls.Add(fields);
-            }
-            var previewButton = new Button { Text = "Preview Grid", AutoSize = true };
-            previewButton.Click += (_, _) => PreviewGrid(display);
-            controls.Add(previewButton);
-            displaysPanel.Controls.Add(Section(display.Name, null, [.. controls]));
-        }
-
-        var unplugged = s.DisplayGrids
+    private List<KeyValuePair<string, DisplayGrid>> Unplugged() =>
+        store.Current.DisplayGrids
             .Where(entry => displays.All(d => d.Id != entry.Key))
             .OrderBy(entry => entry.Value.Name)
             .ToList();
-        if (unplugged.Count > 0)
-        {
-            var rows = unplugged.Select(entry =>
-            {
-                var forget = new Button { Text = "Forget", AutoSize = true };
-                forget.Click += (_, _) =>
-                {
-                    store.Update(settings => settings.WithDisplayGrid(entry.Key, null));
-                    BeginInvoke(RebuildDisplays);
-                };
-                var label = new Label
-                {
-                    Text = $"{entry.Value.Name} — {entry.Value.Columns} × {entry.Value.Rows}",
-                    AutoSize = true,
-                    Anchor = AnchorStyles.Left,
-                };
-                return (Control)Row(label, forget);
-            }).ToArray();
-            displaysPanel.Controls.Add(Section("Unplugged Displays",
-                "Remembered grid sizes of displays that aren't plugged in. They apply again as soon as the display is.",
-                rows));
-        }
-        displaysPanel.ResumeLayout();
-    }
 
     // Briefly shows the display's grid on it, to tell displays apart.
     private void PreviewGrid(Display display)
     {
-        var (columns, rows) = store.Current.GridSize(display.Id);
+        var (columns, rows) = display.Grid(store.Current);
         preview.Show(display.WorkArea, columns, rows);
     }
 
     // MARK: Building blocks
 
-    private static GroupBox Section(string title, string? footer, params Control[] controls)
+    private void Add(Control control) => content.Controls.Add(control);
+
+    private static Control Section(string? title, string? footer, params Control[] controls)
     {
         var panel = new FlowLayoutPanel
         {
@@ -265,7 +369,7 @@ internal sealed class SettingsForm : Form
         if (footer != null) panel.Controls.Add(Hint(footer));
         var group = new GroupBox
         {
-            Text = title,
+            Text = title ?? "",
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             MinimumSize = new Size(ContentWidth, 0),
@@ -299,11 +403,17 @@ internal sealed class SettingsForm : Form
         return box;
     }
 
-    private Control ModifierBoxes(Dictionary<Modifier, CheckBox> boxes, string value,
-        Func<Settings, string, Settings> change)
+    private Control ModifierBoxes(string value, Func<Settings, string, Settings> change)
     {
         var current = Modifiers.Parse(value);
-        var row = Row();
+        var boxes = new Dictionary<Modifier, CheckBox>();
+        var column = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoSize = true,
+            Margin = Padding.Empty,
+        };
         foreach (var modifier in Modifiers.All)
         {
             var box = new CheckBox
@@ -318,9 +428,9 @@ internal sealed class SettingsForm : Form
                 store.Update(settings => change(settings, Modifiers.Format(keys)));
             };
             boxes[modifier] = box;
-            row.Controls.Add(box);
+            column.Controls.Add(box);
         }
-        return row;
+        return column;
     }
 }
 

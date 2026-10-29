@@ -27,12 +27,13 @@ internal static class Program
         var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "SourisFacileFenetre");
         var store = new SettingsStore(Path.Combine(folder, "settings.json"));
+        var memory = new WindowMemoryStore(Path.Combine(folder, "window-frames.json"));
 
         // A control to run code on the UI thread from other threads.
         using var invoker = new Control();
         invoker.CreateControl();
 
-        using var app = new App(store);
+        using var app = new App(store, memory);
         using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         using var quitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, QuitEventName);
         var showWait = ThreadPool.RegisterWaitForSingleObject(showEvent,

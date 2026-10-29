@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace SourisFacile;
 
 // Everything works in virtual screen coordinates, in physical pixels: origin
@@ -7,13 +9,13 @@ public readonly record struct Point(double X, double Y);
 
 public readonly record struct Rect(double X, double Y, double Width, double Height)
 {
-    public double MinX => X;
-    public double MinY => Y;
-    public double MaxX => X + Width;
-    public double MaxY => Y + Height;
-    public double MidX => X + Width / 2;
-    public double MidY => Y + Height / 2;
-    public Point Origin => new(X, Y);
+    [JsonIgnore] public double MinX => X;
+    [JsonIgnore] public double MinY => Y;
+    [JsonIgnore] public double MaxX => X + Width;
+    [JsonIgnore] public double MaxY => Y + Height;
+    [JsonIgnore] public double MidX => X + Width / 2;
+    [JsonIgnore] public double MidY => Y + Height / 2;
+    [JsonIgnore] public Point Origin => new(X, Y);
 
     public static Rect FromEdges(double left, double top, double right, double bottom) =>
         new(left, top, right - left, bottom - top);

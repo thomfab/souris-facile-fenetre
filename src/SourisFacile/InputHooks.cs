@@ -15,6 +15,7 @@ internal sealed class InputHooks : IDisposable
     // Each returns true to swallow the event. They run on the hook thread.
     public Func<int, bool, bool>? Key;            // virtual-key code, down
     public Func<int, bool, Point, bool>? Wheel;   // delta, horizontal, pointer
+    public Func<bool, bool>? Click;               // left button down
     // The pointer moved, or a modifier key went down or up.
     public Action? Changed;
 
@@ -98,6 +99,10 @@ internal sealed class InputHooks : IDisposable
                 {
                     return 1;
                 }
+            }
+            else if (message is WM_LBUTTONDOWN or WM_LBUTTONUP)
+            {
+                if (Click?.Invoke(message == WM_LBUTTONDOWN) == true) return 1;
             }
             else if (message == WM_MOUSEMOVE)
             {
